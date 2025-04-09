@@ -1,1 +1,10 @@
 hp-gpt/
+# Python
+*.py[cod]
+__pycache__/
+*.so
+*.egg-info/
+dist/
+build/
+.env
+.venv
