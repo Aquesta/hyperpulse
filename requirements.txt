@@ -1,0 +1,6 @@
+streamlit
+streamlit-autorefresh
+hyperliquid-python-sdk
+pandas
+plotly
+pyperclip
