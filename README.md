@@ -14,5 +14,5 @@ HyperPulse позволяет:
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/your-repo/hyperpulse.git
+   git clone https://github.com/Aquesta/hyperpulse/hyperpulse.git
    cd hyperpulse
