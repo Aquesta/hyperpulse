@@ -8,8 +8,18 @@ from functools import lru_cache
 import random
 import threading
 import queue
+import json
+import os
+import atexit
 
 logger = setup_logger(__name__)
+
+# Директория для хранения данных
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
+# Создаем директорию, если она не существует
+os.makedirs(DATA_DIR, exist_ok=True)
+# Путь к файлу с накопительной статистикой
+STATS_FILE = os.path.join(DATA_DIR, 'cumulative_stats.json')
 
 # Глобальная переменная для хранения накопленных данных по каждой монете
 # Используем словарь: {монета: DataFrame}
@@ -114,7 +124,7 @@ def preprocess_new_data(new_data, coin):
     """
     if not new_data:
         return pd.DataFrame()
-        
+
     # Преобразуем в DataFrame
     df = pd.DataFrame(new_data)
     
@@ -131,89 +141,6 @@ def preprocess_new_data(new_data, coin):
                 df[col] = pd.to_numeric(df[col], downcast='float')
     
     logger.debug(f"Предобработано {len(df)} новых записей для {coin}")
-    return df
-
-def generate_test_data(coin):
-    """
-    Генерирует тестовые данные для отображения графиков, когда реальных данных нет
-    
-    Args:
-        coin (str): Символ криптовалюты
-        
-    Returns:
-        pandas.DataFrame: DataFrame с тестовыми данными
-    """
-    global cumulative_user_stats
-    
-    logger.info(f"Генерация тестовых данных для {coin}")
-    
-    current_time = datetime.now()
-    test_data = []
-    
-    # Генерируем случайных пользователей
-    users = [f"user{i}" for i in range(1, 11)]
-    
-    # Инициализируем накопительную статистику для тестовых данных
-    if coin not in cumulative_user_stats:
-        cumulative_user_stats[coin] = {}
-    
-    # Генерируем случайные сделки за последние 30 минут
-    for i in range(50):
-        # Случайное время в пределах последних 30 минут
-        random_minutes = random.uniform(0, 30)
-        timestamp = current_time - timedelta(minutes=random_minutes)
-        
-        # Случайная сторона (покупка или продажа)
-        side = random.choice(['A', 'B'])
-        
-        # Случайные пользователи для этой сделки
-        if side == 'B':
-            buyer = random.choice(users)
-            seller = random.choice([u for u in users if u != buyer])
-        else:
-            seller = random.choice(users)
-            buyer = random.choice([u for u in users if u != seller])
-        
-        # Случайная цена и объем
-        price = random.uniform(50000, 60000) if coin == 'BTC' else (
-            random.uniform(3000, 4000) if coin == 'ETH' else random.uniform(100, 200)
-        )
-        volume = random.uniform(0.1, 2.0)
-        total = price * volume
-        
-        # Формируем запись о сделке
-        trade = {
-            'timestamp': timestamp,
-            'side': side,
-            'price': price,
-            'volume': volume,
-            'total': total,
-            'coin': coin,
-            'buyer': buyer,
-            'seller': seller
-        }
-        
-        # Обновляем накопительную статистику для тестовых данных
-        # Покупатель
-        if side == 'B':
-            if buyer not in cumulative_user_stats[coin]:
-                cumulative_user_stats[coin][buyer] = {'buy_count': 0, 'sell_count': 0, 'buy_volume': 0, 'sell_volume': 0}
-            cumulative_user_stats[coin][buyer]['buy_count'] += 1
-            cumulative_user_stats[coin][buyer]['buy_volume'] += total
-        
-        # Продавец
-        if side == 'A':
-            if seller not in cumulative_user_stats[coin]:
-                cumulative_user_stats[coin][seller] = {'buy_count': 0, 'sell_count': 0, 'buy_volume': 0, 'sell_volume': 0}
-            cumulative_user_stats[coin][seller]['sell_count'] += 1
-            cumulative_user_stats[coin][seller]['sell_volume'] += total
-        
-        test_data.append(trade)
-    
-    # Создаем DataFrame и сортируем по времени
-    df = pd.DataFrame(test_data)
-    df.sort_values('timestamp', inplace=True)
-    
     return df
 
 @time_aware_cache(seconds=2)
@@ -237,34 +164,13 @@ def process_trade_data(time_interval, coin):
     # Получаем данные для заданной монеты
     new_data = list(get_trade_data(coin))
     if not new_data:
-        logger.info(f"Нет торговых данных для {coin}, генерируем тестовые данные")
-        # Генерируем тестовые данные для демонстрации
-        test_df = generate_test_data(coin)
-        
-        # Создаем временные группы для графика объемов
-        test_df['time_bin'] = test_df['timestamp'].dt.floor('1s')
-        
-        # Группировка для графика объемов
-        volume_by_time = test_df.pivot_table(
-            index='time_bin', 
-            columns='side', 
-            values='total', 
-            aggfunc=np.sum,
-            observed=True
-        ).fillna(0)
-        
-        # Расчет настроения рынка на основе тестовых данных
-        buy_volume = test_df[test_df['side'] == 'B']['total'].sum()
-        sell_volume = test_df[test_df['side'] == 'A']['total'].sum()
-        total_volume = buy_volume + sell_volume
-        sentiment = (buy_volume / total_volume * 100) if total_volume > 0 else 50
-        
-        return test_df, volume_by_time, sentiment
-    
+        logger.info(f"Нет торговых данных для {coin}")
+        return None, None, None, None
+
     # Предобработка новых данных
     new_df = preprocess_new_data(new_data, coin)
     if new_df.empty:
-        return None, None, None
+        return None, None, None, None
 
     # Инициализируем DataFrame для монеты, если его еще нет
     if coin not in historical_data or historical_data[coin].empty:
@@ -289,7 +195,7 @@ def process_trade_data(time_interval, coin):
 
     if len(interval_df) < MIN_RECORDS_THRESHOLD:
         logger.warning(f"Недостаточно данных в интервале ({time_interval} мин) для {coin}: {len(interval_df)} записей")
-        return None, None, None
+        return None, None, None, None
     
     # Эффективный расчет метрик - используем векторизованные операции
     buy_mask = interval_df['side'] == 'B'
@@ -299,9 +205,15 @@ def process_trade_data(time_interval, coin):
     sell_volume = interval_df.loc[sell_mask, 'total'].sum()
     total_volume = buy_volume + sell_volume
     
-    # Расчет настроения рынка
+    # Расчет настроения рынка по объему
     sentiment = (buy_volume / total_volume * 100) if total_volume > 0 else 50
 
+    # Расчет настроения рынка по количеству сделок
+    buy_count = buy_mask.sum()
+    sell_count = sell_mask.sum()
+    total_count = buy_count + sell_count
+    count_sentiment = (buy_count / total_count * 100) if total_count > 0 else 50
+    
     # Оптимизация для графиков - предварительно создаем time_bin
     if 'time_bin' not in interval_df.columns:
         interval_df.loc[:, 'time_bin'] = interval_df['timestamp'].dt.floor('1s')
@@ -311,13 +223,13 @@ def process_trade_data(time_interval, coin):
         index='time_bin', 
         columns='side', 
         values='total', 
-        aggfunc=np.sum,
-        observed=True  # Устраняем предупреждение
+        aggfunc='sum',
+        observed=True
     ).fillna(0)
     
-    logger.debug(f"Обработаны данные: {len(interval_df)} записей, настроение рынка: {sentiment:.1f}%")
+    logger.debug(f"Обработаны данные: {len(interval_df)} записей, настроение рынка по объему: {sentiment:.1f}%, по количеству: {count_sentiment:.1f}%")
 
-    return interval_df, volume_by_time, sentiment
+    return interval_df, volume_by_time, sentiment, count_sentiment
 
 # Избегаем использования lru_cache с DataFrame, так как он не хешируемый
 def get_user_statistics(df_input):
@@ -425,6 +337,130 @@ def get_cumulative_user_statistics(coin):
     
     return df
 
+def save_cumulative_stats():
+    """Сохраняет накопительную статистику в файл"""
+    global cumulative_user_stats
+    try:
+        # Преобразуем структуру данных в формат, подходящий для JSON
+        serializable_stats = {}
+        for coin, users in cumulative_user_stats.items():
+            serializable_stats[coin] = {
+                user: stats for user, stats in users.items()
+            }
+        
+        # Создаем директорию, если она не существует
+        os.makedirs(os.path.dirname(STATS_FILE), exist_ok=True)
+        
+        # Сохраняем в файл
+        with open(STATS_FILE, 'w') as f:
+            json.dump(serializable_stats, f)
+        logger.info(f"Накопительная статистика успешно сохранена в {STATS_FILE}")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении накопительной статистики: {e}")
+
+def load_cumulative_stats():
+    """Загружает накопительную статистику из файла"""
+    global cumulative_user_stats
+    try:
+        if os.path.exists(STATS_FILE):
+            with open(STATS_FILE, 'r') as f:
+                loaded_stats = json.load(f)
+            
+            # Восстанавливаем структуру данных
+            for coin, users in loaded_stats.items():
+                if coin not in cumulative_user_stats:
+                    cumulative_user_stats[coin] = {}
+                for user, stats in users.items():
+                    cumulative_user_stats[coin][user] = stats
+            
+            logger.info(f"Накопительная статистика успешно загружена из {STATS_FILE}")
+        else:
+            logger.info(f"Файл с накопительной статистикой не найден: {STATS_FILE}")
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке накопительной статистики: {e}")
+
+def clean_cumulative_stats(max_users_per_coin=1000):
+    """
+    Очищает накопительную статистику, оставляя только самых активных пользователей
+    
+    Args:
+        max_users_per_coin (int): Максимальное количество пользователей для хранения по каждой монете
+    """
+    global cumulative_user_stats
+    total_cleaned = 0
+    
+    try:
+        for coin in list(cumulative_user_stats.keys()):
+            if len(cumulative_user_stats[coin]) > max_users_per_coin:
+                # Создаем DataFrame для сортировки
+                data = []
+                for user, stats in cumulative_user_stats[coin].items():
+                    total_volume = stats['buy_volume'] + stats['sell_volume']
+                    total_count = stats['buy_count'] + stats['sell_count']
+                    data.append({
+                        'user': user,
+                        'total_volume': total_volume,
+                        'total_count': total_count
+                    })
+                
+                df = pd.DataFrame(data)
+                # Сортируем по объему и количеству сделок
+                df = df.sort_values(['total_volume', 'total_count'], ascending=False)
+                
+                # Оставляем только самых активных пользователей
+                active_users = set(df.head(max_users_per_coin)['user'].tolist())
+                
+                # Удаляем неактивных пользователей
+                inactive_users = set(cumulative_user_stats[coin].keys()) - active_users
+                for user in inactive_users:
+                    del cumulative_user_stats[coin][user]
+                
+                total_cleaned += len(inactive_users)
+                logger.info(f"Очищено {len(inactive_users)} неактивных пользователей для {coin}")
+        
+        # Если были удаления, сохраняем обновленную статистику
+        if total_cleaned > 0:
+            save_cumulative_stats()
+            
+        return total_cleaned
+    except Exception as e:
+        logger.error(f"Ошибка при очистке накопительной статистики: {e}")
+        return 0
+
+# Периодическая очистка и сохранение статистики
+def start_stats_maintenance(save_interval=300, clean_interval=3600):
+    """
+    Запускает периодическое сохранение и очистку накопительной статистики
+    
+    Args:
+        save_interval (int): Интервал сохранения в секундах
+        clean_interval (int): Интервал очистки в секундах
+    """
+    def maintenance_worker():
+        last_save_time = time.time()
+        last_clean_time = time.time()
+        
+        while True:
+            current_time = time.time()
+            
+            # Проверяем необходимость сохранения
+            if current_time - last_save_time > save_interval:
+                save_cumulative_stats()
+                last_save_time = current_time
+            
+            # Проверяем необходимость очистки
+            if current_time - last_clean_time > clean_interval:
+                clean_cumulative_stats()
+                last_clean_time = current_time
+            
+            # Спим перед следующей проверкой
+            time.sleep(10)
+    
+    # Запускаем обслуживание в отдельном потоке
+    maintenance_thread = threading.Thread(target=maintenance_worker, daemon=True)
+    maintenance_thread.start()
+    logger.info("Запущен поток обслуживания накопительной статистики")
+
 def process_cumulative_stats_queue():
     """
     Функция для обработки очереди с данными для накопительной статистики
@@ -436,8 +472,8 @@ def process_cumulative_stats_queue():
     
     while True:
         try:
-            # Проверяем очередь на наличие новых данных
-            trade_info = cumulative_stats_queue.get(timeout=1)
+            # Проверяем очередь на наличие новых данных (с меньшим таймаутом)
+            trade_info = cumulative_stats_queue.get(timeout=0.5)
             
             # Обновляем накопительную статистику
             update_cumulative_stats(trade_info)
@@ -445,18 +481,28 @@ def process_cumulative_stats_queue():
             # Сообщаем, что задача выполнена
             cumulative_stats_queue.task_done()
         except queue.Empty:
-            # Если очередь пуста, просто ждем
-            time.sleep(0.1)
+            # Если очередь пуста, просто ждем немного
+            time.sleep(0.05)
         except Exception as e:
             logger.error(f"Ошибка при обработке накопительной статистики: {e}")
-            time.sleep(1)  # Ждем немного перед повторной попыткой
+            time.sleep(0.5)  # Ждем немного перед повторной попыткой
 
 # Запускаем обработчик накопительной статистики в отдельном потоке
 def start_cumulative_stats_processor():
     """Запускает обработчик накопительной статистики в отдельном потоке"""
+    # Загружаем сохраненную статистику при запуске
+    load_cumulative_stats()
+    
+    # Запускаем поток обработки очереди
     stats_thread = threading.Thread(target=process_cumulative_stats_queue, daemon=True)
     stats_thread.start()
     logger.info("Запущен поток обработки накопительной статистики")
+    
+    # Запускаем поток обслуживания (сохранение и очистка)
+    start_stats_maintenance()
+
+# Регистрируем сохранение статистики при выходе
+atexit.register(save_cumulative_stats)
 
 # Запускаем обработчик при импорте модуля
 start_cumulative_stats_processor()

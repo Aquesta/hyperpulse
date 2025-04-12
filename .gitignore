@@ -3,6 +3,8 @@ hp-gpt/
 *.py[cod]
 __pycache__/
 *.so
+*.pyc
+*.log
 *.egg-info/
 dist/
 build/

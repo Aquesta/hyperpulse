@@ -3,11 +3,12 @@ from hyperliquid.info import Info
 from hyperliquid.utils import constants
 from collections import deque, defaultdict
 from datetime import datetime
-from config.logging_config import setup_logger
 import streamlit as st
 import time
 import threading
 import queue
+from config.logging_config import setup_logger
+from config.app_config import get_config
 
 logger = setup_logger(__name__)
 
@@ -23,106 +24,135 @@ trade_data = deque(maxlen=1000)
 current_connection = None
 current_loop = None
 is_connected = False
-last_message_time = time.time()
-reconnect_interval = 10  # секунды
-heartbeat_interval = 30  # секунды
+connection_status = {
+    "connected": False,
+    "last_message_time": time.time(),
+    "last_error": None,
+    "error_time": None,
+    "reconnect_count": 0
+}
+
+# Константы
+RECONNECT_INTERVAL = 10  # секунды
+HEARTBEAT_INTERVAL = 30  # секунды
+MAX_RECONNECT_ATTEMPTS = 5
+RECONNECT_DELAY = 5  # секунды между попытками
+QUEUE_SIZE = 1000
 
 # Очередь для обновления накопительной статистики
-# Будет обрабатываться в data_processor
-cumulative_stats_queue = queue.Queue(maxsize=1000)
+cumulative_stats_queue = queue.Queue(maxsize=QUEUE_SIZE)
 
 def on_message(message):
     """Обработчик входящих сообщений от WebSocket"""
-    global last_message_time
+    global connection_status
     
-    # Обновляем время последнего сообщения
-    last_message_time = time.time()
-    
-    if 'data' not in message or not isinstance(message['data'], list):
-        return
+    try:
+        # Обновляем время последнего сообщения
+        connection_status["last_message_time"] = time.time()
         
-    for trade in message['data']:
-        try:
-            # Проверка наличия всех необходимых полей
-            required_fields = ['side', 'time', 'px', 'sz', 'coin']
-            if not all(field in trade for field in required_fields):
-                logger.warning(f"Пропуск сообщения с отсутствующими полями: {trade}")
-                continue
-                
-            coin = trade.get('coin')
-            users = trade.get('users', [])
+        if not isinstance(message, dict) or 'data' not in message or not isinstance(message['data'], list):
+            logger.warning(f"Получено некорректное сообщение: {message}")
+            return
             
-            # Добавляем логирование для отладки
-            logger.info(f"Получено сообщение: {coin}, side={trade['side']}, users={users}")
-            
-            buyer = seller = None
-
-            if trade['side'] == 'B':  # Покупка
-                buyer = users[0] if len(users) > 0 else "unknown"
-                seller = users[1] if len(users) > 1 else "unknown"
-            elif trade['side'] == 'A':  # Продажа
-                seller = users[0] if len(users) > 0 else "unknown"
-                buyer = users[1] if len(users) > 1 else "unknown"
-
-            trade_info = {
-                'timestamp': datetime.fromtimestamp(trade['time'] / 1000),
-                'side': trade['side'],
-                'price': float(trade['px']),
-                'volume': float(trade['sz']),
-                'total': float(trade['sz']) * float(trade['px']),
-                'coin': coin,
-                'buyer': buyer,
-                'seller': seller
-            }
-
-            # Добавляем в обе очереди: общую и специфичную для монеты
-            trade_data.append(trade_info)
-            trade_data_by_coin[coin].append(trade_info)
-            
-            # Добавляем информацию о сделке в очередь для обновления накопительной статистики
+        for trade in message['data']:
             try:
-                cumulative_stats_queue.put(trade_info, block=False)
-            except queue.Full:
-                logger.warning("Очередь для накопительной статистики переполнена, данные будут потеряны")
-            
-            # Логируем добавленные данные
-            logger.info(f"Добавлены данные о сделке: {coin}, buyer={buyer}, seller={seller}")
-            
-        except Exception as e:
-            logger.error(f"Ошибка при обработке трейда: {e}")
+                # Проверка наличия всех необходимых полей
+                required_fields = ['side', 'time', 'px', 'sz', 'coin']
+                if not all(field in trade for field in required_fields):
+                    logger.warning(f"Пропуск сообщения с отсутствующими полями: {trade}")
+                    continue
+                    
+                coin = trade.get('coin')
+                users = trade.get('users', [])
+                
+                # Добавляем логирование для отладки
+                logger.debug(f"Получено сообщение: {coin}, side={trade['side']}, users={users}")
+                
+                buyer = seller = "unknown"
+                
+                # Определяем покупателя и продавца
+                if users:
+                    if trade['side'] == 'B':  # Покупка
+                        buyer = users[0]
+                        seller = users[1] if len(users) > 1 else "unknown"
+                    else:  # Продажа
+                        seller = users[0]
+                        buyer = users[1] if len(users) > 1 else "unknown"
+                
+                # Создаем объект с информацией о сделке
+                trade_info = {
+                    'timestamp': datetime.fromtimestamp(trade['time'] / 1000),
+                    'side': trade['side'],
+                    'price': float(trade['px']),
+                    'volume': float(trade['sz']),
+                    'total': float(trade['sz']) * float(trade['px']),
+                    'coin': coin,
+                    'buyer': buyer,
+                    'seller': seller
+                }
+                
+                # Добавляем в очереди
+                trade_data.append(trade_info)
+                trade_data_by_coin[coin].append(trade_info)
+                
+                # Добавляем в очередь статистики без блокировки
+                try:
+                    cumulative_stats_queue.put_nowait(trade_info)
+                except queue.Full:
+                    logger.warning("Очередь статистики переполнена")
+                
+                logger.debug(f"Обработан трейд: {coin} {trade['side']} {trade_info['volume']:.6f} @ {trade_info['price']:.2f}")
+                
+            except Exception as e:
+                logger.error(f"Ошибка при обработке трейда: {str(e)}")
+                logger.debug(f"Проблемное сообщение: {trade}")
+                
+    except Exception as e:
+        logger.error(f"Ошибка в обработчике сообщений: {str(e)}")
 
 def check_connection_status():
     """Проверяет статус соединения и переподключается при необходимости"""
-    global is_connected, last_message_time
+    global connection_status
     
     while True:
-        current_time = time.time()
-        
-        # Проверяем, давно ли было последнее сообщение
-        if is_connected and current_time - last_message_time > heartbeat_interval:
-            logger.warning(f"Нет сообщений за последние {heartbeat_interval} секунд. Возможно соединение потеряно.")
-            is_connected = False
-        
-        # Если соединение потеряно и есть текущая монета, пытаемся переподключиться
-        if not is_connected and 'current_coin' in st.session_state and st.session_state.current_coin:
-            logger.info(f"Попытка переподключения к {st.session_state.current_coin}...")
-            try:
-                close_websocket()
-                # Даем время на закрытие соединения
-                time.sleep(1)  
-                # Создаем новый поток для соединения
-                ws_thread = threading.Thread(
-                    target=start_websocket,
-                    args=(st.session_state.current_coin,),
-                    daemon=True
-                )
-                ws_thread.start()
-                st.session_state.websocket_thread = ws_thread
-            except Exception as e:
-                logger.error(f"Ошибка при переподключении: {e}")
-        
-        # Проверяем каждые reconnect_interval секунд
-        time.sleep(reconnect_interval)
+        try:
+            current_time = time.time()
+            
+            # Проверяем, давно ли было последнее сообщение
+            if connection_status["connected"] and current_time - connection_status["last_message_time"] > HEARTBEAT_INTERVAL:
+                logger.warning(f"Нет сообщений за последние {HEARTBEAT_INTERVAL} секунд")
+                connection_status["connected"] = False
+            
+            # Если соединение потеряно и есть текущая монета, пытаемся переподключиться
+            if not connection_status["connected"] and 'current_coin' in st.session_state:
+                if connection_status["reconnect_count"] < MAX_RECONNECT_ATTEMPTS:
+                    logger.info(f"Попытка переподключения {connection_status['reconnect_count'] + 1} из {MAX_RECONNECT_ATTEMPTS}")
+                    try:
+                        close_websocket()
+                        time.sleep(RECONNECT_DELAY)
+                        
+                        ws_thread = threading.Thread(
+                            target=start_websocket,
+                            args=(st.session_state.current_coin,),
+                            daemon=True
+                        )
+                        ws_thread.start()
+                        st.session_state.websocket_thread = ws_thread
+                        
+                        connection_status["reconnect_count"] += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Ошибка при переподключении: {str(e)}")
+                else:
+                    logger.error("Достигнут лимит попыток переподключения")
+                    time.sleep(RECONNECT_INTERVAL * 2)  # Ждем дольше перед сбросом счетчика
+                    connection_status["reconnect_count"] = 0
+            
+            time.sleep(RECONNECT_INTERVAL)
+            
+        except Exception as e:
+            logger.error(f"Ошибка в мониторинге соединения: {str(e)}")
+            time.sleep(RECONNECT_INTERVAL)
 
 def start_connection_monitor():
     """Запускает мониторинг соединения в отдельном потоке"""
@@ -134,93 +164,116 @@ def start_connection_monitor():
 
 def close_websocket():
     """Закрывает текущее WebSocket соединение если оно существует"""
-    global current_connection, current_loop, is_connected
+    global current_connection, current_loop, connection_status
     
     if current_connection:
         try:
-            logger.info("Закрытие текущего WebSocket соединения")
-            # Остановить event loop
+            logger.info("Закрытие WebSocket соединения")
             if current_loop and current_loop.is_running():
                 current_loop.stop()
             current_connection = None
-            is_connected = False
-            logger.info("WebSocket соединение успешно закрыто")
+            connection_status["connected"] = False
+            logger.info("WebSocket соединение закрыто")
         except Exception as e:
-            logger.error(f"Ошибка при закрытии WebSocket соединения: {e}")
+            logger.error(f"Ошибка при закрытии соединения: {str(e)}")
 
 def get_trade_data(coin=None):
     """
     Получает данные трейдов с возможностью фильтрации по монете
     
     Args:
-        coin (str, optional): Символ криптовалюты. По умолчанию None (все монеты).
+        coin (str, optional): Символ криптовалюты
         
     Returns:
         deque: Очередь с данными трейдов
     """
-    if coin and coin in trade_data_by_coin:
-        return trade_data_by_coin[coin]
-    return trade_data
+    try:
+        if coin and coin in trade_data_by_coin:
+            return trade_data_by_coin[coin]
+        return trade_data
+    except Exception as e:
+        logger.error(f"Ошибка при получении данных трейдов: {str(e)}")
+        return deque(maxlen=1000)
 
 def start_websocket(coin):
     """Запускает WebSocket соединение для указанной криптовалюты"""
-    global current_connection, current_loop, is_connected, last_message_time
+    global current_connection, current_loop, connection_status
     
-    # Закрыть предыдущее соединение если оно существует
-    close_websocket()
-    
-    # Запустить мониторинг соединения, если еще не запущен
-    start_connection_monitor()
-    
-    # Создаем новый event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    current_loop = loop
-
     try:
-        logger.info(f"Создание нового WebSocket соединения для {coin}")
-        # Инициализация клиента HyperLiquid
-        info = Info(base_url=constants.MAINNET_API_URL, skip_ws=False)
-        # Создание подписки на трейды
+        # Закрываем предыдущее соединение
+        close_websocket()
+        
+        # Запускаем мониторинг соединения
+        start_connection_monitor()
+        
+        # Создаем новый event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        current_loop = loop
+        
+        logger.info(f"Создание WebSocket соединения для {coin}")
+        
+        # Получаем конфигурацию
+        config = get_config()
+        use_testnet = config.get('USE_TESTNET', False)
+        base_url = constants.TESTNET_API_URL if use_testnet else constants.MAINNET_API_URL
+        
+        # Инициализация клиента
+        info = Info(base_url=base_url, skip_ws=False)
+        
+        # Создание подписки
         subscription = {"type": "trades", "coin": coin}
-        # Подписка на события
         info.subscribe(subscription, on_message)
         
-        # Обновляем состояние соединения
+        # Обновляем состояние
         current_connection = info
-        is_connected = True
-        last_message_time = time.time()
+        connection_status.update({
+            "connected": True,
+            "last_message_time": time.time(),
+            "last_error": None,
+            "error_time": None
+        })
         
-        logger.info(f"WebSocket соединение успешно создано для {coin}")
+        logger.info(f"WebSocket соединение установлено для {coin}")
         loop.run_forever()
+        
     except Exception as e:
-        logger.error(f"Ошибка в WebSocket: {e}")
-        is_connected = False
+        logger.error(f"Ошибка при создании WebSocket: {str(e)}")
+        connection_status.update({
+            "connected": False,
+            "last_error": str(e),
+            "error_time": time.time()
+        })
     finally:
-        loop.close()
+        if loop:
+            loop.close()
+        connection_status["connected"] = False
         logger.info("WebSocket loop закрыт")
-        is_connected = False
 
 def connect_websocket():
     """Подключается к WebSocket для текущей выбранной монеты"""
-    if 'coin' not in st.session_state:
-        st.session_state.coin = "BTC"
-    
-    # Сохраняем выбранную монету как текущую для переподключения
-    st.session_state.current_coin = st.session_state.coin
-    
-    # Запускаем WebSocket в отдельном потоке
-    ws_thread = threading.Thread(
-        target=start_websocket,
-        args=(st.session_state.coin,),
-        daemon=True
-    )
-    ws_thread.start()
-    
-    # Сохраняем поток в состоянии сессии для возможности управления
-    st.session_state.websocket_thread = ws_thread
-    
-    # Отправляем сообщение в очередь логов
-    queue_logger.put(f"Подключение к WebSocket для {st.session_state.coin} запущено")
-    
-    return True
+    try:
+        if 'coin' not in st.session_state:
+            st.session_state.coin = "BTC"
+        
+        # Сохраняем выбранную монету
+        st.session_state.current_coin = st.session_state.coin
+        
+        # Запускаем WebSocket
+        ws_thread = threading.Thread(
+            target=start_websocket,
+            args=(st.session_state.coin,),
+            daemon=True
+        )
+        ws_thread.start()
+        
+        # Сохраняем поток
+        st.session_state.websocket_thread = ws_thread
+        
+        queue_logger.put(f"Подключение к WebSocket для {st.session_state.coin} запущено")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Ошибка при подключении к WebSocket: {str(e)}")
+        queue_logger.put(f"Ошибка подключения: {str(e)}")
+        return False

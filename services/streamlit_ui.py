@@ -17,9 +17,8 @@ import traceback
 logger = setup_logger(__name__)
 
 # Настройки интерфейса
-REFRESH_INTERVAL = 3  # секунды для обновления данных
-UPDATE_INTERVAL = 2  # секунды
-MAX_USERS_IN_TABLE = 10
+REFRESH_INTERVAL = 1  # секунды для обновления данных
+UPDATE_INTERVAL = 1  # секунды
 
 # Инициализация состояния сессии
 if 'connected' not in st.session_state:
@@ -33,7 +32,6 @@ if 'last_error' not in st.session_state:
 if 'reconnect_attempts' not in st.session_state:
     st.session_state.reconnect_attempts = 0
 
-# Кэширование графиков для плавного обновления
 @st.cache_data(ttl=REFRESH_INTERVAL, show_spinner=False, max_entries=5)
 def generate_volume_delta_chart(volume_data, coin):
     """Генерация графика разницы объемов продаж и покупок"""
@@ -59,9 +57,9 @@ def generate_volume_delta_chart(volume_data, coin):
         x=x, 
         y=y, 
         mode='lines',
-        line=dict(color='blue', width=2),
+        line=dict(color='rgba(0, 100, 255, 0.8)', width=2),
         fill='tozeroy',
-        fillcolor='rgba(0, 100, 255, 0.2)',
+        fillcolor='rgba(0, 100, 255, 0.1)',
         name='Дельта объемов'
     ))
     
@@ -69,85 +67,25 @@ def generate_volume_delta_chart(volume_data, coin):
         title=f'Дельта объемов для {coin} (Покупка - Продажа)',
         xaxis_title='Время',
         yaxis_title='Объем (USDC)',
-        height=400,
-        margin=dict(l=0, r=0, t=40, b=0)
+        height=500,
+        margin=dict(l=50, r=20, t=40, b=20),
+        font=dict(size=14),
+        yaxis=dict(
+            tickfont=dict(size=12),
+            gridcolor='rgba(128, 128, 128, 0.1)',
+            zerolinecolor='rgba(128, 128, 128, 0.2)'
+        ),
+        xaxis=dict(
+            tickfont=dict(size=12),
+            gridcolor='rgba(128, 128, 128, 0.1)'
+        ),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)'
     )
     
     return fig
 
-@st.cache_data(ttl=REFRESH_INTERVAL, show_spinner=False, max_entries=5)
-def generate_trade_count_chart(user_stats, title="Количество сделок по пользователям", key_suffix=""):
-    """Генерация графика количества сделок по пользователям"""
-    if user_stats is None or user_stats.empty:
-        logger.warning(f"Пустой DataFrame для графика пользователей ({key_suffix})")
-        return None
-    
-    try:
-        # Проверяем наличие необходимых колонок
-        required_columns = ['user', 'buy_count', 'sell_count']
-        if not all(col in user_stats.columns for col in required_columns):
-            missing_cols = [col for col in required_columns if col not in user_stats.columns]
-            logger.warning(f"Отсутствуют необходимые колонки для графика ({key_suffix}): {missing_cols}")
-            return None
-
-        # Создаем копию для безопасности
-        df = user_stats.copy()
-        
-        # Проверяем, есть ли данные после фильтрации
-        if df.empty:
-            logger.warning(f"После фильтрации данных для графика не осталось записей ({key_suffix})")
-            return None
-        
-        # Убеждаемся, что числовые колонки имеют числовой тип
-        for col in ['buy_count', 'sell_count']:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
-        
-        # Сортировка и ограничение количества записей
-        df['total'] = df['buy_count'] + df['sell_count']
-        df = df.sort_values(by='total', ascending=False).head(MAX_USERS_IN_TABLE)
-        
-        # Если после всех преобразований данных нет, возвращаем None
-        if df.empty:
-            logger.warning(f"После сортировки и ограничения не осталось данных для графика ({key_suffix})")
-            return None
-        
-        # Создание графика
-        fig = go.Figure()
-        
-        # Добавляем столбцы покупок
-        fig.add_trace(go.Bar(
-            y=df['user'],
-            x=df['buy_count'],
-            name='Покупки',
-            orientation='h',
-            marker=dict(color='rgba(0, 128, 0, 0.7)')
-        ))
-        
-        # Добавляем столбцы продаж
-        fig.add_trace(go.Bar(
-            y=df['user'],
-            x=df['sell_count'],
-            name='Продажи',
-            orientation='h',
-            marker=dict(color='rgba(255, 0, 0, 0.7)')
-        ))
-        
-        # Настройка макета графика
-        fig.update_layout(
-            title=title,
-            xaxis_title='Количество сделок',
-            barmode='group',
-            height=400,
-            margin=dict(l=0, r=0, t=40, b=0)
-        )
-        
-        return fig
-        
-    except Exception as e:
-        logger.error(f"Ошибка при создании графика пользователей ({key_suffix}): {e}")
-        return None
-
-def format_user_stats(user_stats, title_prefix=""):
+def format_user_stats(user_stats):
     """Форматирование статистики пользователей для отображения"""
     if user_stats is None or user_stats.empty:
         return pd.DataFrame()
@@ -155,15 +93,20 @@ def format_user_stats(user_stats, title_prefix=""):
     # Создаем копию и добавляем производные метрики
     stats = user_stats.copy()
     stats['net_volume'] = stats['buy_volume'] - stats['sell_volume']
+    stats['total_volume'] = stats['buy_volume'] + stats['sell_volume']
     stats['total_trades'] = stats['buy_count'] + stats['sell_count']
     
-    # Сортировка по общему количеству сделок
-    stats = stats.sort_values('total_trades', ascending=False).head(MAX_USERS_IN_TABLE)
+    # Сортировка по общему объему сделок
+    stats = stats.sort_values('total_volume', ascending=False)
     
-    # Форматирование чисел
-    stats['buy_volume'] = stats['buy_volume'].round(2)
-    stats['sell_volume'] = stats['sell_volume'].round(2)
-    stats['net_volume'] = stats['net_volume'].round(2)
+    # Форматирование чисел с долларом и разделителями
+    for col in ['buy_volume', 'sell_volume', 'net_volume', 'total_volume']:
+        stats[col] = stats[col].apply(lambda x: f"${int(x):,}")
+    
+    # Добавляем HTML-ссылки для пользователей
+    stats['user'] = stats['user'].apply(
+        lambda x: f'<a href="https://hypurrscan.io/address/{x}" target="_blank">{x}</a>'
+    )
     
     # Переименование колонок для отображения
     stats = stats.rename(columns={
@@ -173,8 +116,22 @@ def format_user_stats(user_stats, title_prefix=""):
         'buy_volume': 'Объем покупок',
         'sell_volume': 'Объем продаж',
         'net_volume': 'Чистый объем',
+        'total_volume': 'Общий объем',
         'total_trades': 'Всего сделок'
     })
+    
+    # Сортируем колонки
+    column_order = [
+        'Пользователь', 
+        'Общий объем',
+        'Чистый объем', 
+        'Объем покупок', 
+        'Объем продаж', 
+        'Покупки', 
+        'Продажи', 
+        'Всего сделок'
+    ]
+    stats = stats[column_order]
     
     return stats
 
@@ -189,27 +146,30 @@ def update_dashboard():
         
         with st.container():
             # Статус подключения и последнее обновление
-            col1, col2, col3 = st.columns([1, 2, 1])
+            col1, col2, col3 = st.columns([1, 1.5, 1.5])
             
             with col1:
-                st.metric("Статус", "Подключено" if st.session_state.connected else "Отключено")
+                st.metric("Статус", "✅ Подключено" if st.session_state.connected else "❌ Отключено")
             
             with col2:
-                st.write(f"Последнее обновление: {st.session_state.last_update.strftime('%H:%M:%S')}")
-                st.write(f"Монета: {coin}, Интервал: {time_interval} мин")
+                st.write("**Последнее обновление:**")
+                st.write(st.session_state.last_update.strftime('%H:%M:%S'))
             
             with col3:
-                if st.session_state.last_error:
-                    st.error(f"Ошибка: {st.session_state.last_error}")
+                st.write(f"**Монета:** {coin}")
+                st.write(f"**Интервал:** {time_interval} мин")
+            
+            if st.session_state.last_error:
+                st.error(f"Ошибка: {st.session_state.last_error}")
         
         # Процесс обработки с индикатором загрузки
         with st.spinner(f"Обработка данных для {coin}..."):
             try:
-                data, volume_by_time, sentiment = process_trade_data(time_interval, coin)
+                data, volume_by_time, sentiment, count_sentiment = process_trade_data(time_interval, coin)
             except Exception as e:
                 logger.error(f"Ошибка при обработке данных: {e}")
                 st.error(f"Ошибка при обработке данных: {e}")
-                data, volume_by_time, sentiment = None, None, None
+                data, volume_by_time, sentiment, count_sentiment = None, None, None, None
         
         if data is None:
             st.warning(f"Недостаточно данных для {coin} в выбранном интервале.")
@@ -217,111 +177,80 @@ def update_dashboard():
         
         # Отображение настроения рынка
         try:
-            st.metric(
-                "Настроение рынка (% объема покупок)", 
-                f"{sentiment:.1f}%",
-                delta=f"{sentiment - 50:.1f}" if sentiment != 50 else None
-            )
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown('<div style="font-size: 1.2em;">Настроение рынка (% объема покупок)</div>', unsafe_allow_html=True)
+                st.metric(
+                    label="Volume Sentiment",
+                    value=f"{sentiment:.1f}%",
+                    delta=f"{sentiment - 50:.1f}" if sentiment != 50 else None,
+                    label_visibility="hidden"
+                )
+            with col2:
+                st.markdown('<div style="font-size: 1.2em;">Настроение рынка (% количества покупок)</div>', unsafe_allow_html=True)
+                st.metric(
+                    label="Count Sentiment", 
+                    value=f"{count_sentiment:.1f}%",
+                    delta=f"{count_sentiment - 50:.1f}" if count_sentiment != 50 else None,
+                    label_visibility="hidden"
+                )
         except Exception as e:
             logger.error(f"Ошибка при отображении настроения рынка: {e}")
             st.error(f"Ошибка при отображении настроения рынка: {e}")
             
-        # Графики и таблицы
-        col1, col2 = st.columns(2)
-        
-        # График дельты объемов
-        with col1:
-            st.subheader("Дельта объемов")
-            try:
-                volume_chart = generate_volume_delta_chart(volume_by_time, coin)
-                if volume_chart:
-                    # Добавляем timestamp к ключу для уникальности
-                    timestamp_str = datetime.now().strftime("%H%M%S%f")
-                    st.plotly_chart(volume_chart, use_container_width=True, key=f"volume_delta_{coin}_{timestamp_str}")
-                else:
-                    st.info("Недостаточно данных для построения графика.")
-            except Exception as e:
-                logger.error(f"Ошибка при создании графика объемов: {e}")
-                st.error(f"Ошибка при создании графика объемов: {e}")
-        
-        # Статистика пользователей (текущая)
-        with col2:
-            st.subheader("Статистика пользователей (текущий интервал)")
-            try:
-                user_stats = get_user_statistics(data)
-                
-                # Добавляем лог для отладки
-                logger.info(f"Получены данные статистики пользователей: {len(user_stats) if user_stats is not None else 'None'} записей")
-                
-                if user_stats is not None and not user_stats.empty:
-                    # Проверим содержимое user_stats
-                    logger.info(f"Колонки user_stats: {list(user_stats.columns)}")
-                    logger.info(f"Пример данных user_stats: {user_stats.head(1).to_dict('records')}")
-                    
-                    # Удостоверимся, что нужные колонки существуют перед сортировкой
-                    required_columns = ['user', 'buy_count', 'sell_count']
-                    if all(col in user_stats.columns for col in required_columns):
-                        user_chart = generate_trade_count_chart(user_stats, "Сделки за текущий интервал", "current")
-                        if user_chart:
-                            # Добавляем timestamp к ключу для уникальности
-                            timestamp_str = datetime.now().strftime("%H%M%S%f")
-                            st.plotly_chart(user_chart, use_container_width=True, key=f"user_chart_current_{coin}_{timestamp_str}")
-                        else:
-                            st.info("Не удалось создать график статистики пользователей.")
-                    else:
-                        missing_cols = [col for col in required_columns if col not in user_stats.columns]
-                        st.warning(f"Отсутствуют необходимые колонки: {missing_cols}")
-                else:
-                    st.info("Нет данных по пользователям за текущий интервал.")
-            except Exception as e:
-                logger.error(f"Ошибка при создании графика пользователей: {e}")
-                st.error(f"Ошибка при создании графика пользователей: {e}")
+        # График дельты объемов на всю ширину
+        st.subheader("Дельта объемов")
+        try:
+            volume_chart = generate_volume_delta_chart(volume_by_time, coin)
+            if volume_chart:
+                timestamp_str = datetime.now().strftime("%H%M%S%f")
+                st.plotly_chart(volume_chart, use_container_width=True, key=f"volume_delta_{coin}_{timestamp_str}")
+            else:
+                st.info("Недостаточно данных для построения графика.")
+        except Exception as e:
+            logger.error(f"Ошибка при создании графика объемов: {e}")
+            st.error(f"Ошибка при создании графика объемов: {e}")
         
         # Накопительная статистика пользователей
         st.subheader("Накопительная статистика пользователей")
         try:
             cumulative_stats = get_cumulative_user_statistics(coin)
             if cumulative_stats is not None and not cumulative_stats.empty:
-                # Показываем график накопительной статистики
-                col3, col4 = st.columns(2)
-                
-                with col3:
-                    cumulative_chart = generate_trade_count_chart(cumulative_stats, "Сделки (всего)", "cumulative")
-                    if cumulative_chart:
-                        timestamp_str = datetime.now().strftime("%H%M%S%f")
-                        st.plotly_chart(cumulative_chart, use_container_width=True, key=f"user_chart_cumulative_{coin}_{timestamp_str}")
-                    else:
-                        st.info("Не удалось создать график накопительной статистики.")
-                
-                with col4:
-                    # Преобразуем накопительную статистику для таблицы
-                    formatted_cumulative_stats = format_user_stats(cumulative_stats, "Накопительная ")
-                    if not formatted_cumulative_stats.empty:
-                        # Добавляем timestamp к ключу для уникальности
-                        timestamp_str = datetime.now().strftime("%H%M%S%f")
-                        st.dataframe(formatted_cumulative_stats, use_container_width=True, key=f"cumulative_stats_table_{coin}_{timestamp_str}")
-                    else:
-                        st.info("Нет данных для таблицы накопительной статистики.")
+                formatted_stats = format_user_stats(cumulative_stats)
+                if not formatted_stats.empty:
+                    # CSS стили для таблицы
+                    st.markdown("""
+                    <style>
+                        .full-width {
+                            width: 100%;
+                            margin: 0;
+                            padding: 0;
+                        }
+                        .full-width table {
+                            width: 100% !important;
+                            min-width: 100% !important;
+                        }
+                        .full-width th, .full-width td {
+                            white-space: nowrap;
+                            text-align: left;
+                            padding: 8px 12px;
+                        }
+                    </style>
+                    """, unsafe_allow_html=True)
+                    
+                    # Отображение таблицы
+                    st.markdown(
+                        f'<div class="full-width">{formatted_stats.to_html(escape=False, index=False)}</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.info("Нет данных для таблицы накопительной статистики.")
             else:
                 st.info("Нет накопительных данных по пользователям.")
         except Exception as e:
             logger.error(f"Ошибка при отображении накопительной статистики: {e}")
             st.error(f"Ошибка при отображении накопительной статистики: {e}")
         
-        # Таблица статистики пользователей (текущий интервал)
-        st.subheader("Детальная статистика пользователей (текущий интервал)")
-        try:
-            formatted_stats = format_user_stats(user_stats)
-            if not formatted_stats.empty:
-                # Добавляем timestamp к ключу для уникальности
-                timestamp_str = datetime.now().strftime("%H%M%S%f")
-                st.dataframe(formatted_stats, use_container_width=True, key=f"user_stats_table_{coin}_{timestamp_str}")
-            else:
-                st.info("Нет данных для таблицы.")
-        except Exception as e:
-            logger.error(f"Ошибка при создании таблицы статистики: {e}")
-            st.error(f"Ошибка при создании таблицы статистики: {e}")
-            
         # Обновление статуса
         st.session_state.status_message = f"Данные успешно обновлены в {st.session_state.last_update.strftime('%H:%M:%S')}"
         st.session_state.last_error = None
@@ -374,7 +303,7 @@ def show_dashboard():
         
         # Кнопка подключения/отключения
         if not st.session_state.connected:
-            if st.button("Подключиться к WebSocket", key="connect_button"):
+            if st.button("Подключиться к WebSocket", key="connect_button", use_container_width=True):
                 try:
                     connect_websocket()
                     st.session_state.connected = True
@@ -384,12 +313,13 @@ def show_dashboard():
                     logger.error(f"Ошибка при подключении к WebSocket: {e}")
                     st.error(f"Ошибка при подключении: {e}")
         else:
-            if st.button("Отключиться", key="disconnect_button"):
+            if st.button("Отключиться", key="disconnect_button", use_container_width=True):
+                close_websocket()
                 st.session_state.connected = False
                 st.session_state.status_message = "Отключено от WebSocket"
                 
         # Кнопка обновления
-        if st.button("Обновить данные", key="refresh_button"):
+        if st.button("Обновить данные", key="refresh_button", use_container_width=True):
             update_dashboard()
             
         # Статус и сообщения
