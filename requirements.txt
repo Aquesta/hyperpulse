@@ -1,6 +1,8 @@
-streamlit
-streamlit-autorefresh
-hyperliquid-python-sdk
-pandas
-plotly
-pyperclip
+streamlit==1.29.0
+streamlit-autorefresh==1.0.0
+plotly==5.18.0
+pandas==2.1.3
+numpy==1.25.2
+pyperclip==1.8.2
+hyperliquid-python-sdk==0.5.0
+loguru==0.7.0
