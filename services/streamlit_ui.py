@@ -20,7 +20,10 @@ logger = setup_logger(__name__)
 REFRESH_INTERVAL = 1  # секунды для обновления данных
 UPDATE_INTERVAL = 1  # секунды
 
-# Инициализация состояния сессии
+# Глобальная инициализация session_state
+if not hasattr(st, 'session_state'):
+    st.session_state = {}
+
 if 'connected' not in st.session_state:
     st.session_state.connected = False
 if 'last_update' not in st.session_state:
@@ -149,15 +152,18 @@ def update_dashboard():
             col1, col2, col3 = st.columns([1, 1.5, 1.5])
             
             with col1:
-                st.metric("Статус", "✅ Подключено" if st.session_state.connected else "❌ Отключено")
+                st.metric(
+                    label="Connection Status",
+                    value="✅ Подключено" if st.session_state.get("connected", False) else "❌ Отключено"
+                )
             
             with col2:
                 st.write("**Последнее обновление:**")
-                st.write(st.session_state.last_update.strftime('%H:%M:%S'))
+                st.write(st.session_state.last_update.strftime('%H:%M:%S') if st.session_state.last_update else "—")
             
             with col3:
-                st.write(f"**Монета:** {coin}")
-                st.write(f"**Интервал:** {time_interval} мин")
+                st.write(f"**Монета:** {st.session_state.get('coin', '—')}")
+                st.write(f"**Интервал:** {st.session_state.get('time_interval', '—')} мин")
             
             if st.session_state.last_error:
                 st.error(f"Ошибка: {st.session_state.last_error}")
@@ -269,7 +275,23 @@ def show_dashboard():
         page_icon="📊",
         layout="wide",
     )
-    
+
+    # Инициализация session_state, если не существует
+    if 'connected' not in st.session_state:
+        st.session_state.connected = False
+    if 'last_update' not in st.session_state:
+        st.session_state.last_update = None
+    if 'status_message' not in st.session_state:
+        st.session_state.status_message = "Ожидание подключения..."
+    if 'last_error' not in st.session_state:
+        st.session_state.last_error = None
+    if 'reconnect_attempts' not in st.session_state:
+        st.session_state.reconnect_attempts = 0
+    if 'coin' not in st.session_state:
+        st.session_state.coin = "BTC"
+    if 'time_interval' not in st.session_state:
+        st.session_state.time_interval = 5
+
     # Настройка автоматического обновления страницы
     st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="autorefresh")
     
